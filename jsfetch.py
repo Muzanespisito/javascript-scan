@@ -1,4 +1,4 @@
-
+#!/usr/bin/env python3
 """JS Fetch - JavaScript URL security scanner - By MuZaN"""
 
 import argparse
@@ -54,7 +54,7 @@ def ascii_art_animation():
 def ensure_requirements():
     """Check requirements and install them automatically if missing."""
     print(f"{bcolors.RED}[*]{bcolors.RESET} Checking requirements...")
-    
+    # Silence noisy SSL warnings from verify=False fetches
     try:
         import urllib3
         urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -62,7 +62,7 @@ def ensure_requirements():
         pass
     missing = []
     try:
-        import requests 
+        import requests  # noqa: F401
     except ImportError:
         missing.append("requests")
 
@@ -112,6 +112,7 @@ def is_js_url(entry):
     if parsed.scheme in ("http", "https"):
         path = parsed.path.lower()
         return path.endswith(".js")
+    # Local path (strip any query/fragment just in case)
     clean = e.split("?")[0].split("#")[0].lower()
     return clean.endswith(".js")
 
@@ -134,13 +135,15 @@ def fetch_content(entry, timeout=15):
                 return None, f"HTTP {r.status_code}"
             ctype = r.headers.get("Content-Type", "")
             text = r.text
-           
+            # If server returned HTML error page instead of JS, still scan it
+            # but warn if clearly not JS and no JS content
             if "html" in ctype.lower() and "<html" in text[:2000].lower() and ".js" not in text[:2000].lower():
                 pass
             return text, None
         except Exception as e:
             return None, str(e)
     else:
+        # Local file (also strip query/fragment if user pasted URL-like path)
         clean = entry.strip().split("?")[0].split("#")[0]
         try:
             with open(clean, "r", encoding="utf-8", errors="ignore") as f:
@@ -149,60 +152,113 @@ def fetch_content(entry, timeout=15):
             return None, str(e)
 
 
+DUMMY_VALUES = {
+    "", "null", "undefined", "none", "test", "testing", "example",
+    "changeme", "xxx", "***", "123", "password", "your_api_key",
+    "your-api-key", "yourapikey", "api_key", "your_token", "placeholder",
+    "false", "true",
+}
+
+
+def is_dummy(value):
+    v = value.strip().strip('"').strip("'").lower()
+    if v in DUMMY_VALUES:
+        return True
+    if v.startswith("your_") or v.startswith("test_") or v.startswith("example"):
+        return True
+    if set(v) in ({"*"}, {"x"}, {"-"}) :
+        return True
+    return False
+
+
 def scan_javascript(content, filename):
-    """Scan JavaScript content for secrets / endpoints."""
+    """Smart scan: keyword -> value extraction + high-confidence provider patterns."""
     findings = []
 
-    api_key_patterns = [
+    # 1. High-confidence provider patterns (value itself proves secret, no keyword needed)
+    provider_patterns = [
         (r'AKIA[0-9A-Z]{16}', "AWS Access Key"),
-        (r'sk-[a-zA-Z0-9]{20,}', "OpenAI/Secret key"),
-        (r'gsk_[a-zA-Z0-9]{20,}', "Groq/Google AI key"),
+        (r'AIZA[0-9A-Za-z\-_]{35}', "Google API key"),
         (r'AIza[0-9A-Za-z\-_]{35}', "Google API key"),
-        (r'xox[bap]-[a-zA-Z0-9\-]{10,}', "Slack token"),
+        (r'xox[baprs]-[a-zA-Z0-9\-]{10,}', "Slack token"),
         (r'ghp_[a-zA-Z0-9]{36,}', "GitHub token"),
         (r'gho_[a-zA-Z0-9]{36,}', "GitHub OAuth token"),
+        (r'sk-live-[a-zA-Z0-9]{16,}', "Stripe live key"),
+        (r'rk-live-[a-zA-Z0-9]{16,}', "Stripe restricted key"),
+        (r'sk-[a-zA-Z0-9]{20,}', "OpenAI/Secret key"),
         (r'ya29\.[a-zA-Z0-9\-_\.]{20,}', "Google OAuth token"),
         (r'eyJ[A-Za-z0-9\-_]+\.eyJ[A-Za-z0-9\-_]+\.[A-Za-z0-9\-_\.=]*', "JWT token"),
-        (r'(?:api[_-]?key|apikey)\s*[:=]\s*["\']([a-zA-Z0-9\-_\.]{10,})["\']', "API key assignment"),
-        (r'(?:secret|client_secret)\s*[:=]\s*["\']([^"\'\s]{8,})["\']', "Secret assignment"),
-        (r'[A-Za-z0-9_\-]{32,}', "Potential long token (32+ chars)"),
+        (r'-----BEGIN (?:RSA )?PRIVATE KEY-----', "Private key block"),
     ]
-    for pattern, desc in api_key_patterns:
+    for pattern, desc in provider_patterns:
         for match in re.findall(pattern, content):
             if isinstance(match, tuple):
                 match = match[0] if match else ""
-            if not match:
+            if not match or is_dummy(match):
                 continue
             findings.append(f"{bcolors.RED}[API_KEY]{bcolors.RESET} {desc}: {match} (file: {filename})")
 
-    token_patterns = [
-        (r'(?:bearer\s+[a-zA-Z0-9\-_\.=]+)', "Bearer token"),
-        (r'(?:token)\s*[:=]\s*["\']?([a-zA-Z0-9\.\-_]{10,})["\']?', "Token assignment"),
-        (r'(?:auth[_-]?token)\s*[:=]\s*["\']?([a-zA-Z0-9\.\-_]{10,})["\']?', "Auth token"),
-    ]
-    for pattern, desc in token_patterns:
-        for match in re.findall(pattern, content, re.IGNORECASE):
-            if isinstance(match, tuple):
-                match = match[0] if match else ""
-            findings.append(f"{bcolors.RED}[TOKEN]{bcolors.RESET} {desc}: {match} (file: {filename})")
+    # 2. SMART keyword -> value system: find keyword, capture value after : or =
+    # e.g. apiKey: "AIzaSy...", "client_secret": "abc", auth_token=xyz
+    smart_keywords = {
+        # api keys
+        "api_key": "API_KEY", "apikey": "API_KEY", "api-key": "API_KEY",
+        "apiKey": "API_KEY", "app_key": "API_KEY", "appkey": "API_KEY",
+        "public_key": "API_KEY", "publishable_key": "API_KEY",
+        # secrets
+        "client_secret": "SECRET", "clientSecret": "SECRET",
+        "secret_key": "SECRET", "secretKey": "SECRET",
+        "private_key": "SECRET", "privateKey": "SECRET",
+        "aws_secret": "SECRET", "app_secret": "SECRET",
+        # tokens
+        "auth_token": "TOKEN", "authtoken": "TOKEN", "auth-token": "TOKEN",
+        "authToken": "TOKEN", "access_token": "TOKEN", "accessToken": "TOKEN",
+        "refresh_token": "TOKEN", "refreshToken": "TOKEN",
+        "id_token": "TOKEN", "bearer": "TOKEN",
+        "session_token": "TOKEN", "csrf_token": "TOKEN",
+        # creds
+        "password": "CRED", "passwd": "CRED", "pwd": "CRED",
+        "username": "CRED", "login": "CRED",
+    }
+    # ["']?keyword["']?\s*[:=]\s*["']value["']  — handles JS objects, JSON, assignments
+    seen_values = set()
+    for keyword, label in smart_keywords.items():
+        kw = re.escape(keyword)
+        patterns = [
+            rf'["\']?{kw}["\']?\s*:\s*["\']([^"\'\s;,<>}}]{{4,}})["\']',
+            rf'["\']?{kw}["\']?\s*=\s*["\']?([^"\'\s;,<>}}]{{4,}})["\']?',
+        ]
+        for pat in patterns:
+            for match in re.findall(pat, content, re.IGNORECASE):
+                if isinstance(match, tuple):
+                    match = match[0] if match else ""
+                value = match.strip().strip(',').strip(';')
+                if not value or is_dummy(value) or len(value) < 4:
+                    continue
+                # skip obvious non-secrets (function calls, booleans, numbers alone)
+                if value in ("true", "false", "null", "undefined"):
+                    continue
+                if value.lower() in seen_values:
+                    continue
+                seen_values.add(value.lower())
+                findings.append(
+                    f"{bcolors.RED}[{label}]{bcolors.RESET} {keyword}: {value} (file: {filename})"
+                )
 
-    cred_patterns = [
-        (r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}', "Email (potential username)"),
-        (r'(?:password|passwd|pwd)\s*[:=]\s*["\']?([^"\'\s;,]{3,})["\']?', "Hardcoded password"),
-        (r'(?:username|user|login)\s*[:=]\s*["\']?([^"\'\s;,]{2,})["\']?', "Username assignment"),
-    ]
-    for pattern, desc in cred_patterns:
-        for match in re.findall(pattern, content, re.IGNORECASE):
-            if isinstance(match, tuple):
-                match = match[0] if match else ""
-            findings.append(f"{bcolors.RED}[CRED]{bcolors.RESET} {desc}: {match} (file: {filename})")
+    # 3. Emails (potential usernames)
+    for match in re.findall(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}', content):
+        if is_dummy(match):
+            continue
+        findings.append(f"{bcolors.RED}[CRED]{bcolors.RESET} Email: {match} (file: {filename})")
 
+    # 4. URL endpoints / routes inside JS
     url_pattern = r'(https?://[^\s<>"\'`]+)'
     for match in re.findall(url_pattern, content):
         parsed = urlparse(match)
         if parsed.netloc:
             findings.append(f"{bcolors.RED}[URL]{bcolors.RESET} Endpoint: {match} (file: {filename})")
 
+    # Deduplicate while keeping order
     seen = set()
     uniq = []
     for f in findings:
@@ -213,10 +269,11 @@ def scan_javascript(content, filename):
 
 
 def main():
- 
+    # 1. FIRST thing on execute: ASCII art with animation + By MuZaN
     ascii_art_animation()
+    print(f"{bcolors.RED}By MuZaN{bcolors.RESET}\n")
 
-
+    # 2. Check + auto-install requirements
     ensure_requirements()
 
     parser = argparse.ArgumentParser(
@@ -253,7 +310,7 @@ def main():
             if not entry:
                 continue
 
-            
+            # Skip non-JS entries and jump to next URL
             if not is_js_url(entry):
                 print(f"[SKIP] Not a JS file: {entry}")
                 continue
@@ -269,13 +326,13 @@ def main():
                 print(f"{bcolors.RED}[OK]{bcolors.RESET} No secrets found: {entry}")
             for finding in findings:
                 print(finding)
-        
+                # strip ANSI for clean output file
                 clean = re.sub(r'\x1b\[[0-9;]+m', '', finding)
                 out.write(clean + "\n")
 
     print(f"\n{bcolors.RED}Results saved to: {output_file}{bcolors.RESET}")
 
-    
+    # Footer - plain red only (no gradient) as requested
     print(f"\n{bcolors.RED}By MuZaN{bcolors.RESET}\n")
 
 
