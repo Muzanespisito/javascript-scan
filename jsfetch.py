@@ -1,4 +1,4 @@
-#!/usr/bin/env python3
+
 """JS Fetch - JavaScript URL security scanner - By MuZaN"""
 
 import argparse
@@ -54,7 +54,7 @@ def ascii_art_animation():
 def ensure_requirements():
     """Check requirements and install them automatically if missing."""
     print(f"{bcolors.RED}[*]{bcolors.RESET} Checking requirements...")
-    # Silence noisy SSL warnings from verify=False fetches
+    
     try:
         import urllib3
         urllib3.disable_warnings(urllib3.exceptions.InsecureRequestWarning)
@@ -62,7 +62,7 @@ def ensure_requirements():
         pass
     missing = []
     try:
-        import requests  # noqa: F401
+        import requests 
     except ImportError:
         missing.append("requests")
 
@@ -112,7 +112,6 @@ def is_js_url(entry):
     if parsed.scheme in ("http", "https"):
         path = parsed.path.lower()
         return path.endswith(".js")
-    # Local path (strip any query/fragment just in case)
     clean = e.split("?")[0].split("#")[0].lower()
     return clean.endswith(".js")
 
@@ -135,15 +134,13 @@ def fetch_content(entry, timeout=15):
                 return None, f"HTTP {r.status_code}"
             ctype = r.headers.get("Content-Type", "")
             text = r.text
-            # If server returned HTML error page instead of JS, still scan it
-            # but warn if clearly not JS and no JS content
+           
             if "html" in ctype.lower() and "<html" in text[:2000].lower() and ".js" not in text[:2000].lower():
                 pass
             return text, None
         except Exception as e:
             return None, str(e)
     else:
-        # Local file (also strip query/fragment if user pasted URL-like path)
         clean = entry.strip().split("?")[0].split("#")[0]
         try:
             with open(clean, "r", encoding="utf-8", errors="ignore") as f:
@@ -206,7 +203,6 @@ def scan_javascript(content, filename):
         if parsed.netloc:
             findings.append(f"{bcolors.RED}[URL]{bcolors.RESET} Endpoint: {match} (file: {filename})")
 
-    # Deduplicate while keeping order
     seen = set()
     uniq = []
     for f in findings:
@@ -217,10 +213,10 @@ def scan_javascript(content, filename):
 
 
 def main():
-    # 1. FIRST thing on execute: ASCII art with animation
+ 
     ascii_art_animation()
 
-    # 2. Check + auto-install requirements
+
     ensure_requirements()
 
     parser = argparse.ArgumentParser(
@@ -257,7 +253,7 @@ def main():
             if not entry:
                 continue
 
-            # Skip non-JS entries and jump to next URL
+            
             if not is_js_url(entry):
                 print(f"[SKIP] Not a JS file: {entry}")
                 continue
@@ -273,13 +269,13 @@ def main():
                 print(f"{bcolors.RED}[OK]{bcolors.RESET} No secrets found: {entry}")
             for finding in findings:
                 print(finding)
-                # strip ANSI for clean output file
+        
                 clean = re.sub(r'\x1b\[[0-9;]+m', '', finding)
                 out.write(clean + "\n")
 
     print(f"\n{bcolors.RED}Results saved to: {output_file}{bcolors.RESET}")
 
-    # Footer - plain red only (no gradient) as requested
+    
     print(f"\n{bcolors.RED}By MuZaN{bcolors.RESET}\n")
 
 
