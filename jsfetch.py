@@ -112,7 +112,7 @@ def is_js_url(entry):
     if parsed.scheme in ("http", "https"):
         path = parsed.path.lower()
         return path.endswith(".js")
-    # Local path (strip any query/fragment just in case)
+    
     clean = e.split("?")[0].split("#")[0].lower()
     return clean.endswith(".js")
 
@@ -135,15 +135,14 @@ def fetch_content(entry, timeout=15):
                 return None, f"HTTP {r.status_code}"
             ctype = r.headers.get("Content-Type", "")
             text = r.text
-            # If server returned HTML error page instead of JS, still scan it
-            # but warn if clearly not JS and no JS content
+           
             if "html" in ctype.lower() and "<html" in text[:2000].lower() and ".js" not in text[:2000].lower():
                 pass
             return text, None
         except Exception as e:
             return None, str(e)
     else:
-        # Local file (also strip query/fragment if user pasted URL-like path)
+       
         clean = entry.strip().split("?")[0].split("#")[0]
         try:
             with open(clean, "r", encoding="utf-8", errors="ignore") as f:
@@ -175,7 +174,7 @@ def scan_javascript(content, filename):
     """Smart scan: keyword -> value extraction + high-confidence provider patterns."""
     findings = []
 
-    # 1. High-confidence provider patterns (value itself proves secret, no keyword needed)
+   
     provider_patterns = [
         (r'AKIA[0-9A-Z]{16}', "AWS Access Key"),
         (r'AIZA[0-9A-Za-z\-_]{35}', "Google API key"),
@@ -198,10 +197,9 @@ def scan_javascript(content, filename):
                 continue
             findings.append(f"{bcolors.RED}[API_KEY]{bcolors.RESET} {desc}: {match} (file: {filename})")
 
-    # 2. SMART keyword -> value system: find keyword, capture value after : or =
-    # e.g. apiKey: "AIzaSy...", "client_secret": "abc", auth_token=xyz
+  
     smart_keywords = {
-        # api keys
+        
         "api_key": "API_KEY", "apikey": "API_KEY", "api-key": "API_KEY",
         "apiKey": "API_KEY", "app_key": "API_KEY", "appkey": "API_KEY",
         "public_key": "API_KEY", "publishable_key": "API_KEY",
@@ -220,7 +218,7 @@ def scan_javascript(content, filename):
         "password": "CRED", "passwd": "CRED", "pwd": "CRED",
         "username": "CRED", "login": "CRED",
     }
-    # ["']?keyword["']?\s*[:=]\s*["']value["']  — handles JS objects, JSON, assignments
+
     seen_values = set()
     for keyword, label in smart_keywords.items():
         kw = re.escape(keyword)
@@ -235,7 +233,7 @@ def scan_javascript(content, filename):
                 value = match.strip().strip(',').strip(';')
                 if not value or is_dummy(value) or len(value) < 4:
                     continue
-                # skip obvious non-secrets (function calls, booleans, numbers alone)
+                
                 if value in ("true", "false", "null", "undefined"):
                     continue
                 if value.lower() in seen_values:
@@ -245,20 +243,20 @@ def scan_javascript(content, filename):
                     f"{bcolors.RED}[{label}]{bcolors.RESET} {keyword}: {value} (file: {filename})"
                 )
 
-    # 3. Emails (potential usernames)
+   
     for match in re.findall(r'[a-zA-Z0-9._%+-]+@[a-zA-Z0-9.-]+\.[a-zA-Z]{2,}', content):
         if is_dummy(match):
             continue
         findings.append(f"{bcolors.RED}[CRED]{bcolors.RESET} Email: {match} (file: {filename})")
 
-    # 4. URL endpoints / routes inside JS
+  
     url_pattern = r'(https?://[^\s<>"\'`]+)'
     for match in re.findall(url_pattern, content):
         parsed = urlparse(match)
         if parsed.netloc:
             findings.append(f"{bcolors.RED}[URL]{bcolors.RESET} Endpoint: {match} (file: {filename})")
 
-    # Deduplicate while keeping order
+    
     seen = set()
     uniq = []
     for f in findings:
@@ -269,11 +267,11 @@ def scan_javascript(content, filename):
 
 
 def main():
-    # 1. FIRST thing on execute: ASCII art with animation + By MuZaN
+    
     ascii_art_animation()
     print(f"{bcolors.RED}By MuZaN{bcolors.RESET}\n")
 
-    # 2. Check + auto-install requirements
+    
     ensure_requirements()
 
     parser = argparse.ArgumentParser(
@@ -310,7 +308,7 @@ def main():
             if not entry:
                 continue
 
-            # Skip non-JS entries and jump to next URL
+            
             if not is_js_url(entry):
                 print(f"[SKIP] Not a JS file: {entry}")
                 continue
@@ -326,13 +324,13 @@ def main():
                 print(f"{bcolors.RED}[OK]{bcolors.RESET} No secrets found: {entry}")
             for finding in findings:
                 print(finding)
-                # strip ANSI for clean output file
+                
                 clean = re.sub(r'\x1b\[[0-9;]+m', '', finding)
                 out.write(clean + "\n")
 
     print(f"\n{bcolors.RED}Results saved to: {output_file}{bcolors.RESET}")
 
-    # Footer - plain red only (no gradient) as requested
+   
     print(f"\n{bcolors.RED}By MuZaN{bcolors.RESET}\n")
 
 
